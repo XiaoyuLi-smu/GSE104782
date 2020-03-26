@@ -1,0 +1,440 @@
+```{r}
+library(monocle)
+```
+```{r}
+plot_genes_branched_heatmap_modified<- 
+function (cds_subset, 
+          branch_point = 1, 
+          branch_states = NULL, 
+          branch_labels = NULL, 
+          cluster_rows = TRUE, 
+          hclust_method = "ward.D2", 
+          num_clusters = 6, 
+          hmcols = NULL, 
+          branch_colors = c("#7990C8","#979797","#F05662"), 
+          add_annotation_row = NULL, 
+          add_annotation_col = NULL, 
+          show_rownames = T, 
+          use_gene_short_name = TRUE, 
+          scale_max = 3, 
+          scale_min = -3, 
+          norm_method = "log", 
+          trend_formula = "~sm.ns(Pseudotime, df=3) * Branch", 
+          return_heatmap = T, 
+          cores = 1,
+          main=NULL...) {
+  new_cds <- buildBranchCellDataSet(cds_subset, branch_states = branch_states, 
+                                    branch_point = branch_point, progenitor_method = "duplicate")
+  new_cds@dispFitInfo <- cds_subset@dispFitInfo
+  if (is.null(branch_states)) {
+    progenitor_state <- subset(pData(cds_subset), Pseudotime == 
+                                 0)[, "State"]
+    branch_states <- setdiff(pData(cds_subset)$State, progenitor_state)
+  }
+  BranchAB_pheno<-data.frame()
+  for (i in 1:2) {
+    df <- data.frame(pData(new_cds)[new_cds$Branch==unique(new_cds$Branch)[i],])
+    df <- df[order(df$Pseudotime, decreasing = F),]
+    m<-numeric()
+    for(j in seq(0,1,length.out=100)){
+      k=quantile(df$Pseudotime,j)
+      l<-head(which(df$Pseudotime>=k),1)
+      m<-cbind(m,l)
+    }
+    if(i==1) m<-rev(m)
+    BranchAB_pheno<-rbind(BranchAB_pheno,df[m,])
+  }
+  col_gap_ind <- 101
+  newdataA <- data.frame(Pseudotime = seq(0, 100, length.out = 100), 
+                         Branch = as.factor(unique(as.character(pData(new_cds)$Branch))[1]))
+  newdataB <- data.frame(Pseudotime = seq(0, 100, length.out = 100), 
+                         Branch = as.factor(unique(as.character(pData(new_cds)$Branch))[2]))
+  BranchAB_exprs <- genSmoothCurves(new_cds[,], cores = cores, 
+                                    trend_formula = trend_formula, relative_expr = T, new_data = rbind(newdataA, 
+                                                                                                       newdataB))
+  BranchA_exprs <- BranchAB_exprs[, 1:100]
+  BranchB_exprs <- BranchAB_exprs[, 101:200]
+  common_ancestor_cells <- row.names(pData(new_cds)[pData(new_cds)$State %in%                                          setdiff(pData(new_cds)$State,branch_states), ])
+  common_ancestor_cells<-grep("duplicate",common_ancestor_cells,value=T)
+  BranchP_num <- (100 - floor(max(pData(new_cds)[common_ancestor_cells,"Pseudotime"])))
+  BranchA_num <- floor(max(pData(new_cds)[common_ancestor_cells,"Pseudotime"]))
+  BranchB_num <- BranchA_num
+  norm_method <- match.arg(norm_method,c("log", "vstExprs"))
+  if (norm_method == "vstExprs") {
+    BranchA_exprs <- vstExprs(new_cds, expr_matrix = BranchA_exprs)
+    BranchB_exprs <- vstExprs(new_cds, expr_matrix = BranchB_exprs)
+  }else if (norm_method == "log") {
+    BranchA_exprs <- log10(BranchA_exprs + 1)
+    BranchB_exprs <- log10(BranchB_exprs + 1)
+  }
+  heatmap_matrix <- cbind(BranchA_exprs[, (col_gap_ind - 1):1], 
+                          BranchB_exprs)
+  heatmap_matrix = heatmap_matrix[!apply(heatmap_matrix, 1, 
+                                         sd) == 0, ]
+  heatmap_matrix = Matrix::t(scale(Matrix::t(heatmap_matrix), 
+                                   center = TRUE))
+  heatmap_matrix = heatmap_matrix[is.na(row.names(heatmap_matrix)) == 
+                                    FALSE, ]
+  heatmap_matrix[is.nan(heatmap_matrix)] = 0
+  heatmap_matrix[heatmap_matrix > scale_max] = scale_max
+  heatmap_matrix[heatmap_matrix < scale_min] = scale_min
+  heatmap_matrix_ori <- heatmap_matrix
+  heatmap_matrix <- heatmap_matrix[is.finite(heatmap_matrix[,1]) & is.finite(heatmap_matrix[, col_gap_ind]), ]
+  row_dist <- as.dist((1 - cor(Matrix::t(heatmap_matrix)))/2)
+  row_dist[is.na(row_dist)] <- 1
+  exp_rng <- range(heatmap_matrix)
+  bks <- seq(exp_rng[1] - 0.1, exp_rng[2] + 0.1, by = 0.1)
+  if (is.null(hmcols)) {
+    hmcols <- colorRamps::blue2green2red(length(bks) - 1)
+  }
+  ph <- pheatmap::pheatmap(heatmap_matrix, useRaster = T, cluster_cols = FALSE, 
+                 cluster_rows = TRUE, show_rownames = F, show_colnames = F, 
+                 clustering_distance_rows = row_dist, clustering_method = hclust_method, 
+                 cutree_rows = num_clusters, silent = TRUE, filename = NA, 
+                 breaks = bks, color = hmcols,main = main)
+  annotation_row <- data.frame(Cluster = factor(cutree(ph$tree_row, 
+                                                       num_clusters)))
+  if (!is.null(add_annotation_row)) {
+    annotation_row <- cbind(annotation_row, add_annotation_row[row.names(annotation_row), 
+                                                               ])
+  }
+  colnames(heatmap_matrix) <- c(1:ncol(heatmap_matrix))
+  annotation_col <- data.frame(row.names = c(1:ncol(heatmap_matrix)), 
+                               `Cell Type` = c(rep(branch_labels[1], BranchA_num), 
+                                               rep("Pre-branch", 2 * BranchP_num), 
+                                               rep(branch_labels[2],BranchB_num)))
+  colnames(annotation_col) <- "Cell Type"
+  add_annotation_col<-data.frame(Stage=BranchAB_pheno$stage, Pseudotime=BranchAB_pheno$Pseudotime)
+  rownames(add_annotation_col)<-1:200
+  if (!is.null(add_annotation_col)) {
+    annotation_col <- cbind(annotation_col, add_annotation_col[])
+  }
+  names(branch_colors) <- c("Pre-branch", branch_labels[1], 
+                            branch_labels[2])
+  annotation_colors = list(`Cell Type` = branch_colors)
+  names(annotation_colors$`Cell Type`) = c("Pre-branch", 
+                                           branch_labels)
+  if (use_gene_short_name == TRUE) {
+    if (is.null(fData(cds_subset)$gene_short_name) == FALSE) {
+      feature_label <- as.character(fData(cds_subset)[row.names(heatmap_matrix),"gene_short_name"])
+      feature_label[is.na(feature_label)] <- row.names(heatmap_matrix)
+      row_ann_labels <- as.character(fData(cds_subset)[row.names(annotation_row),"gene_short_name"])
+      row_ann_labels[is.na(row_ann_labels)] <- row.names(annotation_row)
+    }
+    else {
+      feature_label <- row.names(heatmap_matrix)
+      row_ann_labels <- row.names(annotation_row)
+    }
+  }
+  else {
+    feature_label <- row.names(heatmap_matrix)
+    row_ann_labels <- row.names(annotation_row)
+  }
+  row.names(heatmap_matrix) <- feature_label
+  row.names(annotation_row) <- row_ann_labels
+  ph_res <- pheatmap::pheatmap(heatmap_matrix[, ], useRaster = T, cluster_cols = FALSE, 
+                     cluster_rows = TRUE, show_rownames = show_rownames, show_colnames = F, 
+                     clustering_distance_rows = row_dist, clustering_method = hclust_method, 
+                     cutree_rows = num_clusters, annotation_row = annotation_row, 
+                     annotation_col = annotation_col, annotation_colors = annotation_colors, 
+                     gaps_col = col_gap_ind, treeheight_row = 20, breaks = bks, 
+                     fontsize = 6, color = hmcols, border_color = NA, silent = F,main = main)
+  grid::grid.rect(gp = grid::gpar("fill", col = NA))
+  grid::grid.draw(ph_res$gtable)
+  if (return_heatmap) {
+    return(list(BranchA_exprs = BranchA_exprs, BranchB_exprs = BranchB_exprs, 
+                heatmap_matrix = heatmap_matrix, heatmap_matrix_ori = heatmap_matrix_ori, 
+                ph = ph, col_gap_ind = col_gap_ind, row_dist = row_dist, 
+                hmcols = hmcols, annotation_colors = annotation_colors, 
+                annotation_row = annotation_row, annotation_col = annotation_col, 
+                ph_res = ph_res))
+  }
+}
+```
+```{r}
+plot_pseudotime_heatmap_modified<-function (cds_subset, 
+          cluster_rows = TRUE, hclust_method = "ward.D2", 
+          num_clusters = 6, hmcols = NULL, add_annotation_row = NULL, 
+          add_annotation_col = NULL, show_rownames = FALSE, use_gene_short_name = TRUE, 
+          norm_method = c("log", "vstExprs"), scale_max = 3, 
+          scale_min = -3, trend_formula = "~sm.ns(Pseudotime, df=3)", 
+          return_heatmap = FALSE, cores = 1,main) 
+{
+  num_clusters <- min(num_clusters, nrow(cds_subset))
+  pseudocount <- 1
+  newdata <- data.frame(Pseudotime = seq(min(pData(cds_subset)$Pseudotime), 
+                                         max(pData(cds_subset)$Pseudotime), length.out = 100))
+  m <- genSmoothCurves(cds_subset, cores = cores, trend_formula = trend_formula, 
+                       relative_expr = T, new_data = newdata)
+  m = m[!apply(m, 1, sum) == 0, ]
+  norm_method <- match.arg(norm_method)
+  if (norm_method == "vstExprs" && is.null(cds_subset@dispFitInfo[["blind"]]$disp_func) == 
+      FALSE) {
+    m = vstExprs(cds_subset, expr_matrix = m)
+  }
+  else if (norm_method == "log") {
+    m = log10(m + pseudocount)
+  }
+  m = m[!apply(m, 1, sd) == 0, ]
+  m = Matrix::t(scale(Matrix::t(m), center = TRUE))
+  m = m[is.na(row.names(m)) == FALSE, ]
+  m[is.nan(m)] = 0
+  m[m > scale_max] = scale_max
+  m[m < scale_min] = scale_min
+  heatmap_matrix <- m
+  row_dist <- as.dist((1 - cor(Matrix::t(heatmap_matrix)))/2)
+  row_dist[is.na(row_dist)] <- 1
+  if (is.null(hmcols)) {
+    bks <- seq(-3.1, 3.1, by = 0.1)
+    hmcols <- colorRamps::blue2green2red(length(bks) - 1)
+  }
+  else {
+    bks <- seq(-3.1, 3.1, length.out = length(hmcols))
+  }
+  ph <- pheatmap::pheatmap(heatmap_matrix, useRaster = T, cluster_cols = FALSE, 
+                 cluster_rows = cluster_rows, show_rownames = F, show_colnames = F, 
+                 clustering_distance_rows = row_dist, clustering_method = hclust_method, 
+                 cutree_rows = num_clusters, silent = TRUE, filename = NA, 
+                 breaks = bks, border_color = NA, color = hmcols)
+  if (cluster_rows) {
+    annotation_row <- data.frame(Cluster = factor(cutree(ph$tree_row, 
+                                                         num_clusters)))
+  }
+  else {
+    annotation_row <- NULL
+  }
+  if (!is.null(add_annotation_row)) {
+    old_colnames_length <- ncol(annotation_row)
+    annotation_row <- cbind(annotation_row, add_annotation_row[row.names(annotation_row), 
+                                                               ])
+    colnames(annotation_row)[(old_colnames_length + 1):ncol(annotation_row)] <- colnames(add_annotation_row)
+  }
+  if (!is.null(add_annotation_col)) {
+    if (nrow(add_annotation_col) != 100) {
+      stop("add_annotation_col should have only 100 rows (check genSmoothCurves before you supply the annotation data)!")
+    }
+    annotation_col <- add_annotation_col
+  }
+  else {
+    annotation_col <- NA
+  }
+  if (use_gene_short_name == TRUE) {
+    if (is.null(fData(cds_subset)$gene_short_name) == FALSE) {
+      feature_label <- as.character(fData(cds_subset)[row.names(heatmap_matrix), 
+                                                      "gene_short_name"])
+      feature_label[is.na(feature_label)] <- row.names(heatmap_matrix)
+      row_ann_labels <- as.character(fData(cds_subset)[row.names(annotation_row), 
+                                                       "gene_short_name"])
+      row_ann_labels[is.na(row_ann_labels)] <- row.names(annotation_row)
+    }
+    else {
+      feature_label <- row.names(heatmap_matrix)
+      row_ann_labels <- row.names(annotation_row)
+    }
+  }
+  else {
+    feature_label <- row.names(heatmap_matrix)
+    if (!is.null(annotation_row)) 
+      row_ann_labels <- row.names(annotation_row)
+  }
+  row.names(heatmap_matrix) <- feature_label
+  if (!is.null(annotation_row)) 
+    row.names(annotation_row) <- row_ann_labels
+  colnames(heatmap_matrix) <- c(1:ncol(heatmap_matrix))
+  ph_res <- pheatmap::pheatmap(heatmap_matrix[, ], useRaster = T, cluster_cols = FALSE, 
+                     cluster_rows = cluster_rows, show_rownames = show_rownames, 
+                     show_colnames = F, clustering_distance_rows = row_dist, 
+                     clustering_method = hclust_method, cutree_rows = num_clusters, 
+                     annotation_row = annotation_row, annotation_col = annotation_col, 
+                     treeheight_row = 20, breaks = bks, fontsize = 6, color = hmcols, 
+                     border_color = NA, silent = TRUE, filename = NA,main = main)
+  grid::grid.rect(gp = grid::gpar("fill", col = NA))
+  grid::grid.draw(ph_res$gtable)
+  if (return_heatmap) {
+    return(ph_res)
+  }
+}
+```
+
+```{r}
+#Load Seurat object
+load("wang.Rdata")
+wang<-seurat_object
+data <- as(as.matrix(wang@assays$RNA@counts), 'sparseMatrix')
+rm(seurat_obj)
+pd <- new('AnnotatedDataFrame', data = wang@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+fd <- new('AnnotatedDataFrame', data = fData)
+#Construct monocle cds
+monocle_cds <- newCellDataSet(data,
+                              phenoData = pd,
+                              featureData = fd,
+                              lowerDetectionLimit = 1,
+                              expressionFamily = negbinomial.size())
+
+monocle_object<-monocle_cds
+monocle_object <- estimateSizeFactors(monocle_object)
+monocle_object <- estimateDispersions(monocle_object)
+
+monocle_object <- detectGenes(monocle_object, min_expr = 0 )
+
+print(head(fData(monocle_object)))
+expressed_genes <- row.names(subset(fData(monocle_object),num_cells_expressed >= 1))
+print(head(pData(monocle_object)))
+```
+##Step 1: choosing genes that define progress----
+```{r}
+diff_test_res <- differentialGeneTest(monocle_object,
+                                      fullModelFormulaStr = "~stage")
+?differentialGeneTest
+ordering_genes <- row.names (subset(diff_test_res, qval<0.01))
+monocle_object <- setOrderingFilter(monocle_object, ordering_genes)
+plot_ordering_genes(monocle_object)
+```
+##Trajectory step 2: reduce data dimensionality----
+```{r}
+monocle_object <- reduceDimension(monocle_object)
+?reduceDimension
+```
+##Trajectory step 3: order cells along the trajectory  
+```{r}
+monocle_object <- orderCells(monocle_object)
+monocle_object_ini<-monocle_object
+?orderCells
+plot_cell_trajectory(monocle_object, color_by = "stage")+
+  guides(color=guide_legend(title = "Stage"))
+```
+```{r}
+plot_cell_trajectory(monocle_object, color_by = "State")
+```
+```{r}
+plot_cell_trajectory(monocle_object, color_by = "Pseudotime")
+```
+```{r}
+boxplot(Pseudotime~State,pData(monocle_object))
+```
+
+```{r}
+#The following function makes it easy to identify the state of most cells containing zero pseudotime value. Then we can pass it on to the root_state parameter.
+GM_state <- function(cds,ini){
+  if (length(unique(pData(cds)$State)) > 1){
+    ini_counts <- table(pData(cds)$State, pData(cds)$stage)[,ini]
+    return(as.numeric(names(ini_counts)[which(ini_counts == max(ini_counts))]))
+  } else {
+    return (1)
+  }
+}
+monocle_object_root <- orderCells(monocle_object, root_state = GM_state(monocle_object,"S0"))
+plot_cell_trajectory(monocle_object_root, color_by = "Pseudotime")
+```
+```{r}
+monocle_object<-monocle_object_root
+table(monocle_object$stage,monocle_object$State)
+```
+```{r}
+plot_cell_trajectory(monocle_object, color_by = "Pseudotime")
+
+```
+```{r}
+#Finding Genes that Change as a Function of Pseudotime----
+start_time<-Sys.time()
+diff_test_res_pseduotime <- differentialGeneTest(monocle_object,
+                                      fullModelFormulaStr = "~sm.ns(Pseudotime)")
+end_time<-Sys.time()
+```
+```{r}
+head(diff_test_res_pseduotime[,c("gene_short_name", "pval", "qval")]
+)
+```
+```{r}
+sig_gene_pseudotime <- subset(diff_test_res_pseduotime, qval < 0.01)
+sig_gene_pseudotime<-sig_gene_pseudotime[order(sig_gene_pseudotime$qval),]
+sig_gene_pseudotime_names <- row.names(sig_gene_pseudotime)
+binner <- function(monocle_object){
+  df <- data.frame(pData(monocle_object))
+  df <- df[order(df$Pseudotime, decreasing = F),]
+  l<-numeric()
+  for(i in seq(0,1,length.out=100)){
+    j=quantile(df$Pseudotime,i)
+    k<-head(which(df$Pseudotime>=j),1)
+    l<-cbind(l,k)
+  }
+  df<-df[l,]
+  return(df)
+}
+bin <- binner(monocle_object)
+rownames(bin)<-1:100
+boxplot(Pseudotime~stage,bin)
+```
+```{r}
+ann<-data.frame(Stage=bin$stage, Pseudotime=bin$Pseudotime)
+p<-plot_pseudotime_heatmap_modified(monocle_object[sig_gene_pseudotime_names[1:50],],
+                        num_clusters = 3,
+                        show_rownames = T,
+                        return_heatmap = T,
+                        add_annotation_col = ann,
+                        main = "Genes expression along pseudotime")
+```
+
+```{r}
+clusters <- cutree(p$tree_row, k = 3)
+clustering <- data.frame(clusters)
+#clustering[,1] <- as.character(clustering[,1])
+colnames(clustering) <- "Gene_Clusters"
+table(clustering$Gene_Clusters)
+tmp<-data.frame()
+for(i in 1:3){
+  print(head(rownames(clustering)[clustering$Gene_Clusters==i]))
+}
+
+```
+```{r}
+clustering<-cbind(clustering,symbol=rownames(clustering))
+sig_gene_pseudotime<-cbind(sig_gene_pseudotime,symbol=rownames(sig_gene_pseudotime))
+clustering<-merge(clustering,sig_gene_pseudotime,by="symbol")
+clustering<-clustering[order(clustering$Gene_Clusters,clustering$qval,decreasing = F),]
+for (i in 1:3) {
+  print(head(clustering$symbol[clustering$Gene_Clusters==i]))
+}
+```
+```{r}
+plot_cell_trajectory(monocle_object, color_by = "State")
+```
+
+##Analyzing Branches in Single-Cell Trajectories----
+```{r}
+BEAM_res <- BEAM(monocle_object, branch_states = bs,branch_labels = bl)
+BEAM_res_ori<-BEAM_res 
+BEAM_res <- subset(BEAM_res, qval < 0.01)
+BEAM_res <- BEAM_res[order(BEAM_res$qval),]
+BEAM_res_names <- row.names(BEAM_res)
+
+load("BEAM_res.Rdata")
+bs<-c(4,1)
+bl<-c("Mild","Severe")
+bp=2
+p<-plot_genes_branched_heatmap_modified(
+  monocle_object[BEAM_res_names[1:50],],
+                            branch_states =  bs,
+                            branch_labels = bl,
+                            num_clusters = 3,
+                            show_rownames = T,
+                            return_heatmap = T,
+                            branch_colors = c("#979797",#grey
+                                              "#7990C8",#blue
+                                              "#F05662"#red      
+                                              ),
+                            cores = 1,
+                            main = "Genes expression along different cell trajectories"
+  )
+```
+```{r}
+clusters <- cutree(p$ph_res$tree_row, k = 3)
+clustering <- data.frame(clusters)
+colnames(clustering) <- "Gene_Clusters"
+table(clustering$Gene_Clusters)
+for(i in 1:3){
+  print(head(rownames(clustering)[clustering$Gene_Clusters==i]))
+}
+```
+
